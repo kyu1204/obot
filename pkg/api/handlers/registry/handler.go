@@ -513,16 +513,11 @@ func (h *Handler) getCredentialsForServers(
 		return nil, fmt.Errorf("failed to list credentials: %w", err)
 	}
 
-	// Reveal and build map
+	// Build map from listed credentials (keys only, values not needed)
 	credMap := make(map[string]map[string]string)
 	for _, cred := range creds {
 		if _, ok := credMap[cred.ToolName]; !ok {
-			revealed, err := req.GPTClient.RevealCredential(req.Context(), []string{cred.Context}, cred.ToolName)
-			if err != nil {
-				// Skip if credential not found
-				continue
-			}
-			credMap[cred.ToolName] = revealed.Env
+			credMap[cred.ToolName] = cred.Env
 		}
 	}
 

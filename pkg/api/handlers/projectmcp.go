@@ -135,11 +135,7 @@ func (p *ProjectMCPHandler) ListServer(req api.Context) error {
 	credMap := make(map[string]map[string]string, len(creds))
 	for _, cred := range creds {
 		if _, ok := credMap[cred.ToolName]; !ok {
-			c, err := req.GPTClient.RevealCredential(req.Context(), []string{cred.Context}, cred.ToolName)
-			if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-				return fmt.Errorf("failed to find credential: %w", err)
-			}
-			credMap[cred.ToolName] = c.Env
+			credMap[cred.ToolName] = cred.Env
 		}
 	}
 

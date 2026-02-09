@@ -446,38 +446,58 @@ func (h *MCPCatalogHandler) AdminListServersForEntryInCatalog(req api.Context) e
 		return fmt.Errorf("failed to list servers: %w", err)
 	}
 
-	var items []types.MCPServer
+	// Collect non-template servers and their credential contexts
+	type serverWithCredCtx struct {
+		server  v1.MCPServer
+		credCtx string
+	}
+	var servers []serverWithCredCtx
+	var credCtxs []string
 	for _, server := range list.Items {
 		if server.Spec.Template {
-			// Hide template servers
 			continue
 		}
-
 		var credCtx string
 		if server.Spec.MCPCatalogID != "" {
 			credCtx = fmt.Sprintf("%s-%s", server.Spec.MCPCatalogID, server.Name)
 		} else {
 			credCtx = fmt.Sprintf("%s-%s", server.Spec.UserID, server.Name)
 		}
+		servers = append(servers, serverWithCredCtx{server: server, credCtx: credCtx})
+		credCtxs = append(credCtxs, credCtx)
+	}
 
-		cred, err := req.GPTClient.RevealCredential(req.Context(), []string{credCtx}, server.Name)
-		if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-			return fmt.Errorf("failed to find credential: %w", err)
+	// Batch-fetch all credentials in a single call
+	credEnvMap := make(map[string]map[string]string)
+	if len(credCtxs) > 0 {
+		allCreds, err := req.GPTClient.ListCredentials(req.Context(), gptscript.ListCredentialsOptions{
+			CredentialContexts: credCtxs,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list credentials: %w", err)
 		}
+		for _, cred := range allCreds {
+			credEnvMap[cred.Context+"/"+cred.ToolName] = cred.Env
+		}
+	}
 
-		slug, err := SlugForMCPServer(req.Context(), req.Storage, server, server.Spec.UserID, catalogName, "")
+	var items []types.MCPServer
+	for _, si := range servers {
+		credEnv := credEnvMap[si.credCtx+"/"+si.server.Name]
+
+		slug, err := SlugForMCPServer(req.Context(), req.Storage, si.server, si.server.Spec.UserID, catalogName, "")
 		if err != nil {
 			return fmt.Errorf("failed to generate slug: %w", err)
 		}
 
 		var components []types.MCPServer
-		if server.Spec.Manifest.Runtime == types.RuntimeComposite {
-			components, err = resolveCompositeComponents(req, server)
+		if si.server.Spec.Manifest.Runtime == types.RuntimeComposite {
+			components, err = resolveCompositeComponents(req, si.server)
 			if err != nil {
 				return err
 			}
 		}
-		items = append(items, ConvertMCPServer(server, cred.Env, h.serverURL, slug, components...))
+		items = append(items, ConvertMCPServer(si.server, credEnv, h.serverURL, slug, components...))
 	}
 
 	return req.Write(types.MCPServerList{Items: items})
@@ -530,7 +550,8 @@ func (h *MCPCatalogHandler) AdminListServersForAllEntriesInCatalog(req api.Conte
 		filteredServers = append(filteredServers, server)
 	}
 
-	var items []types.MCPServer
+	// Collect credential contexts for batch lookup
+	var credCtxs []string
 	for _, server := range filteredServers {
 		var credCtx string
 		if server.Spec.MCPCatalogID != "" {
@@ -538,11 +559,26 @@ func (h *MCPCatalogHandler) AdminListServersForAllEntriesInCatalog(req api.Conte
 		} else {
 			credCtx = fmt.Sprintf("%s-%s", server.Spec.UserID, server.Name)
 		}
+		credCtxs = append(credCtxs, credCtx)
+	}
 
-		cred, err := req.GPTClient.RevealCredential(req.Context(), []string{credCtx}, server.Name)
-		if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-			return fmt.Errorf("failed to find credential: %w", err)
+	// Batch-fetch all credentials in a single call
+	credEnvMap := make(map[string]map[string]string)
+	if len(credCtxs) > 0 {
+		allCreds, err := req.GPTClient.ListCredentials(req.Context(), gptscript.ListCredentialsOptions{
+			CredentialContexts: credCtxs,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list credentials: %w", err)
 		}
+		for _, cred := range allCreds {
+			credEnvMap[cred.Context+"/"+cred.ToolName] = cred.Env
+		}
+	}
+
+	var items []types.MCPServer
+	for i, server := range filteredServers {
+		credEnv := credEnvMap[credCtxs[i]+"/"+server.Name]
 
 		slug, err := SlugForMCPServer(req.Context(), req.Storage, server, server.Spec.UserID, catalogName, "")
 		if err != nil {
@@ -556,7 +592,7 @@ func (h *MCPCatalogHandler) AdminListServersForAllEntriesInCatalog(req api.Conte
 				return err
 			}
 		}
-		items = append(items, ConvertMCPServer(server, cred.Env, h.serverURL, slug, components...))
+		items = append(items, ConvertMCPServer(server, credEnv, h.serverURL, slug, components...))
 	}
 
 	return req.Write(types.MCPServerList{Items: items})
@@ -600,13 +636,17 @@ func (h *MCPCatalogHandler) ListServersForEntry(req api.Context) error {
 		return fmt.Errorf("failed to list servers: %w", err)
 	}
 
-	var items []types.MCPServer
+	// Collect non-template servers and their credential contexts
+	type serverWithCredCtx struct {
+		server  v1.MCPServer
+		credCtx string
+	}
+	var servers []serverWithCredCtx
+	var credCtxs []string
 	for _, server := range list.Items {
 		if server.Spec.Template {
-			// Hide template servers
 			continue
 		}
-
 		var credCtx string
 		if server.Spec.MCPCatalogID != "" {
 			credCtx = fmt.Sprintf("%s-%s", server.Spec.MCPCatalogID, server.Name)
@@ -615,24 +655,41 @@ func (h *MCPCatalogHandler) ListServersForEntry(req api.Context) error {
 		} else {
 			credCtx = fmt.Sprintf("%s-%s", server.Spec.UserID, server.Name)
 		}
-		cred, err := req.GPTClient.RevealCredential(req.Context(), []string{credCtx}, server.Name)
-		if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-			return fmt.Errorf("failed to find credential: %w", err)
-		}
+		servers = append(servers, serverWithCredCtx{server: server, credCtx: credCtx})
+		credCtxs = append(credCtxs, credCtx)
+	}
 
-		slug, err := SlugForMCPServer(req.Context(), req.Storage, server, server.Spec.UserID, catalogName, "")
+	// Batch-fetch all credentials in a single call
+	credEnvMap := make(map[string]map[string]string)
+	if len(credCtxs) > 0 {
+		allCreds, err := req.GPTClient.ListCredentials(req.Context(), gptscript.ListCredentialsOptions{
+			CredentialContexts: credCtxs,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list credentials: %w", err)
+		}
+		for _, cred := range allCreds {
+			credEnvMap[cred.Context+"/"+cred.ToolName] = cred.Env
+		}
+	}
+
+	var items []types.MCPServer
+	for _, si := range servers {
+		credEnv := credEnvMap[si.credCtx+"/"+si.server.Name]
+
+		slug, err := SlugForMCPServer(req.Context(), req.Storage, si.server, si.server.Spec.UserID, catalogName, "")
 		if err != nil {
 			return fmt.Errorf("failed to generate slug: %w", err)
 		}
 
 		var components []types.MCPServer
-		if server.Spec.Manifest.Runtime == types.RuntimeComposite {
-			components, err = resolveCompositeComponents(req, server)
+		if si.server.Spec.Manifest.Runtime == types.RuntimeComposite {
+			components, err = resolveCompositeComponents(req, si.server)
 			if err != nil {
 				return fmt.Errorf("failed to resolve composite components: %w", err)
 			}
 		}
-		items = append(items, ConvertMCPServer(server, cred.Env, h.serverURL, slug, components...))
+		items = append(items, ConvertMCPServer(si.server, credEnv, h.serverURL, slug, components...))
 	}
 
 	return req.Write(types.MCPServerList{Items: items})
@@ -683,9 +740,18 @@ func (h *MCPCatalogHandler) GetServerFromEntry(req api.Context) error {
 		credCtx = fmt.Sprintf("%s-%s", server.Spec.UserID, server.Name)
 	}
 
-	cred, err := req.GPTClient.RevealCredential(req.Context(), []string{credCtx}, server.Name)
-	if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-		return fmt.Errorf("failed to find credential: %w", err)
+	var credEnv map[string]string
+	creds, err := req.GPTClient.ListCredentials(req.Context(), gptscript.ListCredentialsOptions{
+		CredentialContexts: []string{credCtx},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list credentials: %w", err)
+	}
+	for _, c := range creds {
+		if c.ToolName == server.Name {
+			credEnv = c.Env
+			break
+		}
 	}
 
 	slug, err := SlugForMCPServer(req.Context(), req.Storage, server, server.Spec.UserID, catalogName, "")
@@ -701,7 +767,7 @@ func (h *MCPCatalogHandler) GetServerFromEntry(req api.Context) error {
 			return err
 		}
 	}
-	return req.Write(ConvertMCPServer(server, cred.Env, h.serverURL, slug, components...))
+	return req.Write(ConvertMCPServer(server, credEnv, h.serverURL, slug, components...))
 }
 
 // GenerateToolPreviews launches a temporary instance of an MCP server from a catalog entry

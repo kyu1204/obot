@@ -222,11 +222,7 @@ func (m *MCPHandler) ListServer(req api.Context) error {
 	credMap := make(map[string]map[string]string, len(creds))
 	for _, cred := range creds {
 		if _, ok := credMap[cred.ToolName]; !ok {
-			c, err := req.GPTClient.RevealCredential(req.Context(), []string{cred.Context}, cred.ToolName)
-			if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-				return fmt.Errorf("failed to find credential: %w", err)
-			}
-			credMap[cred.ToolName] = c.Env
+			credMap[cred.ToolName] = cred.Env
 		}
 	}
 
@@ -2583,13 +2579,10 @@ func SlugForMCPServer(ctx context.Context, client kclient.Client, server v1.MCPS
 	return slug, nil
 }
 
-// resolveCompositeComponents lists catalog entry-based components of a composite MCP server, reveals their credentials, and
+// resolveCompositeComponents lists catalog entry-based components of a composite MCP server, fetches their credentials, and
 // converts them to the public API type.
 func resolveCompositeComponents(req api.Context, composite v1.MCPServer) ([]types.MCPServer, error) {
-	var (
-		componentServers    v1.MCPServerList
-		convertedComponents []types.MCPServer
-	)
+	var componentServers v1.MCPServerList
 
 	if err := req.List(&componentServers, &kclient.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.compositeName", composite.Name),
@@ -2598,15 +2591,31 @@ func resolveCompositeComponents(req api.Context, composite v1.MCPServer) ([]type
 		return nil, fmt.Errorf("failed to list composite child servers: %w", err)
 	}
 
+	// Batch-fetch credentials for all components in a single call
+	credCtxs := make([]string, 0, len(componentServers.Items))
 	for _, component := range componentServers.Items {
-		cred, err := req.GPTClient.RevealCredential(req.Context(), []string{fmt.Sprintf("%s-%s", component.Spec.UserID, component.Name)}, component.Name)
-		if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-			return nil, fmt.Errorf("failed to reveal credential for component %s: %w", component.Name, err)
-		}
+		credCtxs = append(credCtxs, fmt.Sprintf("%s-%s", component.Spec.UserID, component.Name))
+	}
 
+	credEnvMap := make(map[string]map[string]string)
+	if len(credCtxs) > 0 {
+		allCreds, err := req.GPTClient.ListCredentials(req.Context(), gptscript.ListCredentialsOptions{
+			CredentialContexts: credCtxs,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list credentials for composite components: %w", err)
+		}
+		for _, cred := range allCreds {
+			credEnvMap[cred.Context+"/"+cred.ToolName] = cred.Env
+		}
+	}
+
+	convertedComponents := make([]types.MCPServer, 0, len(componentServers.Items))
+	for i, component := range componentServers.Items {
+		credEnv := credEnvMap[credCtxs[i]+"/"+component.Name]
 		addExtractedEnvVars(&component)
 		// No slug/URL needed; only Configured/NeedsURL are used from the component
-		convertedComponents = append(convertedComponents, ConvertMCPServer(component, cred.Env, "", ""))
+		convertedComponents = append(convertedComponents, ConvertMCPServer(component, credEnv, "", ""))
 	}
 
 	return convertedComponents, nil
@@ -2667,11 +2676,7 @@ func (m *MCPHandler) ListServersFromAllSources(req api.Context) error {
 	credMap := make(map[string]map[string]string, len(creds))
 	for _, cred := range creds {
 		if _, ok := credMap[cred.ToolName]; !ok {
-			c, err := req.GPTClient.RevealCredential(req.Context(), []string{cred.Context}, cred.ToolName)
-			if err != nil && !errors.As(err, &gptscript.ErrNotFound{}) {
-				return fmt.Errorf("failed to find credential: %w", err)
-			}
-			credMap[cred.ToolName] = c.Env
+			credMap[cred.ToolName] = cred.Env
 		}
 	}
 
